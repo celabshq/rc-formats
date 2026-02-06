@@ -1,6 +1,7 @@
 use criterion::{BatchSize, Criterion};
 use criterion::{criterion_group, criterion_main};
 
+use tls_codec::zero_copy::DeserializeRef;
 use tls_codec::*;
 
 /// Length of the test bytes vector.
@@ -14,6 +15,7 @@ fn vector(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+
     c.bench_function("TLS Deserialize VL Vector", |b| {
         b.iter_batched_ref(
             || {
@@ -36,6 +38,7 @@ fn byte_vector(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+
     c.bench_function("TLS Deserialize VL Byte Vector", |b| {
         b.iter_batched_ref(
             || {
@@ -44,6 +47,20 @@ fn byte_vector(c: &mut Criterion) {
             },
             |serialized_long_vec| {
                 VLBytes::tls_deserialize(&mut serialized_long_vec.as_slice()).unwrap()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    c.bench_function("TLS Deserialize VL Byte Ref", |b| {
+        b.iter_batched_ref(
+            || {
+                let long_vec = vec![77u8; N];
+                long_vec.tls_serialize_detached().unwrap()
+            },
+            |serialized_long_vec| {
+                let (_bytes, _remainder) =
+                    VLByteSlice::tls_deserialize_ref(serialized_long_vec).unwrap();
             },
             BatchSize::SmallInput,
         )

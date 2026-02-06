@@ -255,6 +255,32 @@ fn deserialize_tls_vl_bytes() {
 }
 
 #[test]
+fn deserialize_tls_vl_byte_slice() {
+    use tls_codec::zero_copy::DeserializeRef;
+    let b = &[4u8, 77, 88, 1, 99] as &[u8];
+
+    let (v, remainder) = VLByteSlice::tls_deserialize_ref(&b).expect("Unable to tls_deserialize");
+    assert_eq!(5, v.tls_serialized_len());
+    assert!(remainder.is_empty());
+    assert_eq!(&[77, 88, 1, 99], v.as_slice());
+
+    let long_vector = vec![77u8; 65535];
+    let serialized_long_vec = VLByteSlice(&long_vector).tls_serialize_detached().unwrap();
+    assert_eq!(serialized_long_vec[0], 0x80);
+
+    let (deserialized_long_vec, remainder) =
+        VLByteSlice::tls_deserialize_ref(serialized_long_vec.as_slice()).unwrap();
+    assert_eq!(
+        deserialized_long_vec.tls_serialized_len(),
+        long_vector.len() + 4
+    );
+    assert!(remainder.is_empty());
+
+    assert_eq!(long_vector.len(), deserialized_long_vec.as_slice().len());
+    assert_eq!(long_vector.as_slice(), deserialized_long_vec.as_slice());
+}
+
+#[test]
 fn deserialize_bytes_tls_vl_bytes() {
     use tls_codec::DeserializeBytes;
     let b = &[4u8, 77, 88, 1, 99];

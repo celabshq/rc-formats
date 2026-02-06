@@ -1424,3 +1424,129 @@ fn impl_conditionally_deserializable(mut annotated_item: ItemStruct) -> TokenStr
         #deserialize_bytes_implementation
     }
 }
+
+#[proc_macro_derive(DeserializeRef)]
+pub fn derive_deserialize_ref(input: TokenStream) -> TokenStream {
+    // 1. Parse the input struct
+    let input = parse_macro_input!(input as DeriveInput);
+
+    // 2. Extract the struct name and generate the new name (Original + "Ref")
+    let original_name = &input.ident;
+    let new_name = quote::format_ident!("{}Ref", original_name);
+
+    // 3. Ensure this is actually a struct
+    let fields = match input.data {
+        Data::Struct(ref data) => &data.fields,
+        _ => {
+            return syn::Error::new_spanned(input, "DeserializeRef can only be used on structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // 4. Modify Generics to include <'bytes>
+    // We clone existing generics (in case the struct is Struct<T>) and add 'bytes
+    let mut generics = input.generics.clone();
+    let lifetime: syn::LifetimeParam = syn::parse_quote!('bytes);
+
+    // Insert 'bytes at the beginning of the generic params
+    generics
+        .params
+        .insert(0, syn::GenericParam::Lifetime(lifetime));
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    // 5. Transform the fields
+    // We map over every field, keep its name and visibility, but wrap the type in RefT
+    let new_fields = match fields {
+        syn::Fields::Named(named) => {
+            let recurse = named.named.iter().map(|f| {
+                let name = &f.ident;
+                let ty = &f.ty;
+                let vis = &f.vis;
+                quote! {
+                    #vis #name: RefT<'bytes, #ty>
+                }
+            });
+            quote! { { #(#recurse),* } }
+        }
+        syn::Fields::Unnamed(unnamed) => {
+            let recurse = unnamed.unnamed.iter().map(|f| {
+                let ty = &f.ty;
+                let vis = &f.vis;
+                quote! {
+                    #vis RefT<'bytes, #ty>
+                }
+            });
+            quote! { ( #(#recurse),* ); }
+        }
+        syn::Fields::Unit => quote! { ; },
+    };
+
+    // 6. Generate the final struct definition
+    let vis = &input.vis; // Preserve original visibility (pub, etc.)
+
+    // 7. Generate the DeserializeRef implementation
+    // Strategy: We need to track the position in the byte slice as we deserialize each field.
+    // For each field, we deserialize it using DeserializeBytes, then create a RefT pointing to
+    // that portion of the original byte slice.
+    let simple_field_deserialize = match fields {
+        syn::Fields::Named(named) => {
+            let recurse = named.named.iter().map(|f| {
+                let name = &f.ident;
+                let ty = &f.ty;
+                quote! {
+                    let field_start_pos = original_bytes.len() - bytes.len();
+                    let (#name, bytes) = <#ty as ::tls_codec::DeserializeBytes>::tls_deserialize_bytes(bytes)?;
+                    let field_end_pos = original_bytes.len() - bytes.len();
+                    let field_slice = &original_bytes[field_start_pos..field_end_pos];
+                    let #name = ::tls_codec::zero_copy::RefT::<'bytes, #ty>::new(field_slice);
+                }
+            });
+            quote! { #(#recurse)* }
+        }
+        syn::Fields::Unnamed(unnamed) => {
+            let recurse = (0..unnamed.unnamed.len()).map(|i| {
+                let field_name = quote::format_ident!("field_{}", i);
+                let ty = &unnamed.unnamed[i].ty;
+                quote! {
+                    let field_start_pos = original_bytes.len() - bytes.len();
+                    let (#field_name, bytes) = <#ty as ::tls_codec::DeserializeBytes>::tls_deserialize_bytes(bytes)?;
+                    let field_end_pos = original_bytes.len() - bytes.len();
+                    let field_slice = &original_bytes[field_start_pos..field_end_pos];
+                    let #field_name = ::tls_codec::zero_copy::RefT::<'bytes, #ty>::new(field_slice);
+                }
+            });
+            quote! { #(#recurse)* }
+        }
+        syn::Fields::Unit => quote! {},
+    };
+
+    let struct_constructor = match fields {
+        syn::Fields::Named(named) => {
+            let fields_iter = named.named.iter().map(|f| &f.ident);
+            quote! { #new_name { #(#fields_iter),* } }
+        }
+        syn::Fields::Unnamed(unnamed) => {
+            let fields_iter = (0..unnamed.unnamed.len()).map(|i| {
+                quote::format_ident!("field_{}", i)
+            });
+            quote! { #new_name ( #(#fields_iter),* ) }
+        }
+        syn::Fields::Unit => quote! { #new_name },
+    };
+
+    let expanded = quote! {
+        #vis struct #new_name #impl_generics #where_clause #new_fields
+
+        impl #impl_generics ::tls_codec::zero_copy::DeserializeRef<'bytes> for #new_name #ty_generics #where_clause {
+            fn tls_deserialize_ref(bytes: &'bytes [u8]) -> Result<(Self, &'bytes [u8]), ::tls_codec::Error> {
+                use ::tls_codec::DeserializeBytes;
+                let original_bytes = bytes;
+                #simple_field_deserialize
+                Ok((#struct_constructor, bytes))
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}

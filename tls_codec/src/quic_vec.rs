@@ -22,7 +22,7 @@ use arbitrary::{Arbitrary, Unstructured};
 #[cfg(feature = "serde")]
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-use crate::{DeserializeBytes, Error, SerializeBytes, Size};
+use crate::{DeserializeBytes, Error, SerializeBytes, Size, zero_copy::DeserializeRef};
 
 #[cfg(feature = "mls")]
 const MAX_MLS_LEN: u64 = (1 << 30) - 1;
@@ -371,6 +371,8 @@ mod serde_impl {
         deserializer.deserialize_any(BytesOrSeq)
     }
 }
+
+#[cfg_attr(feature = "serde", derive(SerdeSerialize))]
 pub struct VLByteSlice<'a>(pub &'a [u8]);
 
 impl fmt::Debug for VLByteSlice<'_> {
@@ -400,6 +402,27 @@ impl Size for VLByteSlice<'_> {
     #[inline]
     fn tls_serialized_len(&self) -> usize {
         tls_serialize_bytes_len(self.0)
+    }
+}
+
+impl<'a> DeserializeRef<'a> for VLByteSlice<'a> {
+    fn tls_deserialize_ref(bytes: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
+        <&[u8]>::tls_deserialize_ref(bytes).map(|(value, remainder)| (Self(value), remainder))
+    }
+}
+
+impl<'a> DeserializeRef<'a> for &'a [u8] {
+    fn tls_deserialize_ref(bytes: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
+        let ((length, _len_len), remainder) = read_variable_length_bytes(bytes)?;
+
+        if length == 0 {
+            // An empty vector.
+            // XXX: May also return a Err(Error::EndOfStream)
+            return Ok((&[], remainder));
+        }
+
+        let (slice, remainder) = remainder.split_at(length);
+        Ok((slice, remainder))
     }
 }
 
